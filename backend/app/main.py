@@ -38,8 +38,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://smartscreen-git-main-hemanthkumarburadas-projects.vercel.app",
-        "https://smartscreen-9lzujt06j-hemanthkumarburadas-projects.vercel.app"
+        "https://smartscreen-eight.vercel.app",
+        "https://*.vercel.app"  # 🔥 ADD THIS
     ],
     allow_credentials=True,
     allow_methods=["*"],
