@@ -20,7 +20,7 @@ sentence-transformers==2.7.0
 scikit-learn==1.4.1.post1
 
 # Video processing
-oopenai-whisper
+openai-whisper
 moviepy==1.0.3
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
