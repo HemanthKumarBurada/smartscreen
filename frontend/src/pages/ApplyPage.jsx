@@ -34,9 +34,9 @@ export default function ApplyPage() {
 
         setJobs(jobData);
       } catch (err) {
-        console.error("Fetch jobs failed:", err);
-        setTimeout(fetchJobs, 2000); // retry
-      }
+  console.error("Fetch jobs failed:", err);
+  setError('Could not load jobs. Please refresh the page.');
+}
     };
 
     fetchJobs();

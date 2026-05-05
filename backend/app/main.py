@@ -36,16 +36,14 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://smartscreen-beige.vercel.app",
+        "https://smartscreen-eight.vercel.app",  # your other domain too
         "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://smartscreen-eight.vercel.app",
-        "https://*.vercel.app"  # 🔥 ADD THIS
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Routes
 app.include_router(router, prefix="/api")
 

@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import axios from 'axios';
+import { getRecordInfo, uploadVideo } from '../services/api';
 
 const MAX_SECONDS = 150; // 2 minutes 30 seconds
 
@@ -20,8 +20,8 @@ export default function RecordPage() {
   const [secondsLeft, setSecondsLeft] = useState(MAX_SECONDS);
   const [rerecordUsed, setRerecordUsed] = useState(false); // only 1 re-record allowed
 
-  useEffect(() => {
-    axios.get(`/api/record/${token}`)
+useEffect(() => {
+    getRecordInfo(token)
       .then(r => setJobInfo(r.data))
       .catch(() => setError('Invalid or expired link.'));
   }, [token]);
@@ -112,22 +112,19 @@ export default function RecordPage() {
     startCamera();
   };
 
-  const submitVideo = async () => {
+const submitVideo = async () => {
     if (!recordedBlob) return;
     setStage('uploading');
     try {
       const formData = new FormData();
       formData.append('video', recordedBlob, 'recording.webm');
-      await axios.post(`/api/record/${token}/upload`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
+      await uploadVideo(token, formData);
       setStage('done');
     } catch {
       setError('Upload failed. Please try again.');
       setStage('preview');
     }
   };
-
   if (error) return (
     <div style={S.center}>
       <div style={S.card}><h2 style={{ color: '#e74c3c' }}>⚠️ {error}</h2></div>
