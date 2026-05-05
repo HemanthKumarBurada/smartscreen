@@ -21,26 +21,18 @@ export default function ApplyPage() {
   const [done, setDone] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    const fetchJobs = async () => {
-      try {
-        const r = await listJobs();
-        console.log("API response:", r.data); // 🔍 debug
-
-        // ✅ SAFE handling for both formats
-        const jobData = Array.isArray(r.data)
-          ? r.data
-          : r.data.jobs || [];
-
-        setJobs(jobData);
-      } catch (err) {
-  console.error("Fetch jobs failed:", err);
-  setError('Could not load jobs. Please refresh the page.');
-}
-    };
-
-    fetchJobs();
-  }, []);
+useEffect(() => {
+  const fetchJobs = async () => {
+    try {
+      const r = await listJobs();
+      setJobs(r.data);
+    } catch {
+      // retry after 2 seconds if backend not ready
+      setTimeout(fetchJobs, 2000);
+    }
+  };
+  fetchJobs();
+}, []);
 
   const handle = e => {
     const { name, value, files } = e.target;
@@ -49,20 +41,16 @@ export default function ApplyPage() {
 
   const submit = async e => {
     e.preventDefault();
-    setError('');
-    setLoading(true);
-
+    setError(''); setLoading(true);
     try {
       const fd = new FormData();
       fd.append('job_id', form.job_id);
       fd.append('name', form.name);
       fd.append('email', form.email);
       fd.append('resume', form.resume);
-
       await applyJob(fd);
       setDone(true);
     } catch (err) {
-      console.error(err);
       setError(err.response?.data?.detail || 'Submission failed. Please try again.');
     } finally {
       setLoading(false);
@@ -87,64 +75,27 @@ export default function ApplyPage() {
       <div style={S.card}>
         <h1 style={S.h1}>Apply for a Position</h1>
         <p style={S.sub}>Submit your resume. You'll receive an email with a live video recording link.</p>
-
         <form onSubmit={submit}>
           <label style={S.label}>Job Position *</label>
-          <select
-            name="job_id"
-            required
-            value={form.job_id}
-            onChange={handle}
-            style={S.select}
-          >
+          <select name="job_id" required value={form.job_id} onChange={handle} style={S.select}>
             <option value="">Select a position...</option>
-
-            {/* ✅ SAFE MAP */}
-            {Array.isArray(jobs) && jobs.map(j => (
-              <option key={j.id} value={j.id}>
-                {j.title}
-              </option>
-            ))}
+            {jobs.map(j => <option key={j.id} value={j.id}>{j.title}</option>)}
           </select>
 
           <label style={S.label}>Full Name *</label>
-          <input
-            name="name"
-            required
-            placeholder="Your full name"
-            value={form.name}
-            onChange={handle}
-            style={S.input}
-          />
+          <input name="name" required placeholder="Your full name" value={form.name} onChange={handle} style={S.input} />
 
           <label style={S.label}>Email Address *</label>
-          <input
-            name="email"
-            type="email"
-            required
-            placeholder="your@email.com"
-            value={form.email}
-            onChange={handle}
-            style={S.input}
-          />
+          <input name="email" type="email" required placeholder="your@email.com" value={form.email} onChange={handle} style={S.input} />
 
           <label style={S.label}>Resume (PDF or DOCX) *</label>
-          <input
-            name="resume"
-            type="file"
-            accept=".pdf,.docx,.doc"
-            required
-            onChange={handle}
-            style={S.input}
-          />
+          <input name="resume" type="file" accept=".pdf,.docx,.doc" required onChange={handle} style={S.input} />
 
           {error && <div style={S.error}>{error}</div>}
-
           <button type="submit" style={S.btn} disabled={loading}>
             {loading ? 'Submitting...' : '📤 Submit Application'}
           </button>
         </form>
-
         <p style={{ textAlign: 'center', marginTop: 20, color: '#6B7280', fontSize: 13 }}>
           Are you an HR? <a href="/hr" style={{ color: '#4F46E5' }}>Login here</a>
         </p>

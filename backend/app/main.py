@@ -16,8 +16,6 @@ async def lifespan(app: FastAPI):
     # Startup
     create_tables()
     print("✅ SmartScreen API started")
-    # Note: local docs address remains for local dev, 
-    # Render will provide its own production URL
     print("📖 Docs: http://localhost:8000/docs")
     yield
     # Shutdown (optional cleanup)
@@ -30,20 +28,19 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+# CORS
 
-# --- UPDATED CORS SETTINGS ---
-# Added your specific Vercel deployment URL from image_1159d0.png
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://smartscreen-beige.vercel.app",
-        "https://smartscreen-eight.vercel.app",  # your other domain too
         "http://localhost:3000",
+        "http://127.0.0.1:3000"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # Routes
 app.include_router(router, prefix="/api")
 
