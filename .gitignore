@@ -1,0 +1,14 @@
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+
+# Node
+frontend/node_modules/
+frontend/build/
+frontend/.env
+
+# Large binaries and OS files
+*.dll
+*.exe
+.DS_Store
