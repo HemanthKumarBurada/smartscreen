@@ -1,6 +1,8 @@
 import axios from 'axios';
 
-const API = axios.create({ baseURL: '/api' });
+const API = axios.create({
+  baseURL: import.meta.env.REACT_APP_API_URL || 'http://localhost:8000/api'
+});
 
 // Attach JWT token to every request if present
 API.interceptors.request.use(cfg => {
