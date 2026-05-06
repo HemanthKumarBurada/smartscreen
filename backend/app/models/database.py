@@ -38,6 +38,7 @@ class Job(Base):
     weight_score1 = Column(Float, default=40.0)   # resume vs JD
     weight_score2 = Column(Float, default=35.0)   # audio vs resume
     weight_score3 = Column(Float, default=25.0)   # frame behavior
+    weight_score4 = Column(Float, default=20.0)   # add 4th weight
     qualifying_score = Column(Float, default=60.0)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -58,6 +59,7 @@ class Application(Base):
     score1 = Column(Float, nullable=True)
     score2 = Column(Float, nullable=True)
     score3 = Column(Float, nullable=True)
+    score4 = Column(Float, nullable=True)
     final_score = Column(Float, nullable=True)
     is_qualified = Column(Boolean, nullable=True)
     status = Column(String, default="resume_submitted")  # resume_submitted | video_pending | video_received | scored | notified

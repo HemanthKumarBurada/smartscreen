@@ -18,7 +18,11 @@ from app.config import settings
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/hr/login")
 UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+RESUME_DIR = os.path.join(UPLOAD_DIR, "resumes")
+VIDEO_DIR  = os.path.join(UPLOAD_DIR, "videos")
+
+os.makedirs(RESUME_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR,  exist_ok=True)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def get_current_hr(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> HRUser:
@@ -45,18 +49,21 @@ def run_video_pipeline(app_id: int, db_url: str):
         job = db.query(Job).filter(Job.id == app.job_id).first()
 
         # Score 2
-        score2, transcript = compute_score2(app.video_path, app.resume_text or "")
+        score2, score4, transcript = compute_score2(
+         app.video_path, app.resume_text or "", job.description or ""
+)
         # Score 3
         score3, frame_data = compute_score3(app.video_path, transcript)
         # Final
         result = compute_final_score(
-            app.score1 or 0, score2, score3,
-            job.weight_score1, job.weight_score2, job.weight_score3,
-            job.qualifying_score, frame_data.get("malpractice_flag", False)
-        )
+    app.score1 or 0, score2, score3, score4,
+    job.weight_score1, job.weight_score2, job.weight_score3, job.weight_score4,
+    job.qualifying_score, frame_data.get("malpractice_flag", False)
+)
 
         app.score2 = score2
         app.score3 = score3
+        app.score4 = score4
         app.final_score = result["final_score"]
         app.is_qualified = result["is_qualified"]
         app.transcript = transcript
@@ -103,7 +110,8 @@ def hr_me(hr: HRUser = Depends(get_current_hr)):
 # ─── Jobs ─────────────────────────────────────────────────────────────────────
 @router.post("/jobs", response_model=JobOut)
 def create_job(data: JobCreate, hr: HRUser = Depends(get_current_hr), db: Session = Depends(get_db)):
-    if abs(data.weight_score1 + data.weight_score2 + data.weight_score3 - 100) > 0.1:
+    total = data.weight_score1 + data.weight_score2 + data.weight_score3 + data.weight_score4  # ← include w4
+    if abs(total - 100) > 0.1:
         raise HTTPException(400, "Weights must sum to 100")
     job = Job(hr_id=hr.id, **data.model_dump())
     db.add(job); db.commit(); db.refresh(job)
@@ -139,10 +147,10 @@ async def apply(
     if not job:
         raise HTTPException(404, "Job not found")
 
-    # Save resume
+    # Save resume file
     ext = os.path.splitext(resume.filename)[1]
     filename = f"{uuid.uuid4()}{ext}"
-    resume_path = os.path.join(UPLOAD_DIR, filename)
+    resume_path = os.path.join(RESUME_DIR, filename)
     with open(resume_path, "wb") as f:
         shutil.copyfileobj(resume.file, f)
 
@@ -152,31 +160,45 @@ async def apply(
     except Exception as e:
         raise HTTPException(400, f"Could not parse resume: {e}")
 
+    # Debug log
+    print(f"[apply] resume_text length: {len(resume_text)}")
+    print(f"[apply] resume_text preview: {resume_text[:100]!r}")
+
+    if not resume_text.strip():
+        raise HTTPException(400, "Could not extract text from resume. Please upload a text-based PDF or DOCX.")
+
     # Score 1
     score1 = compute_score1(resume_text, job.description, job.required_skills)
+    print(f"[apply] score1: {score1}")
 
-    # Create application record
+    # Create application
     token = generate_video_token()
+    job_title = job.title  # capture before session closes
+
     app = Application(
         job_id=job_id,
         candidate_name=name,
         candidate_email=email,
         resume_path=resume_path,
-        resume_text=resume_text,
+        resume_text=resume_text,          # ← explicitly set
         video_token=token,
         token_expires=datetime.utcnow() + timedelta(hours=48),
         score1=score1,
         status="resume_submitted"
     )
-    db.add(app); db.commit(); db.refresh(app)
+    db.add(app)
+    db.commit()
+    db.refresh(app)  # ← reload from DB to confirm it was saved
 
-    # Send recording link email
-    job_title = job.title
+    # Confirm resume_text was actually saved
+    print(f"[apply] saved app.id={app.id}, resume_text length in DB: {len(app.resume_text or '')}")
+
+    # Send email in background (no db access here)
     background_tasks.add_task(
-    lambda: __import__('asyncio').run(
-        send_recording_link(name, email, token, job_title)  # job_title not job.title
+        lambda: __import__('asyncio').run(
+            send_recording_link(name, email, token, job_title)
+        )
     )
-)
 
     return {
         "message": "Resume received! Check your email for the video recording link.",
@@ -219,7 +241,7 @@ async def upload_video(
     # Save video
     ext = os.path.splitext(video.filename)[1] or ".webm"
     filename = f"video_{uuid.uuid4()}{ext}"
-    video_path = os.path.join(UPLOAD_DIR, filename)
+    video_path = os.path.join(VIDEO_DIR, filename)
     with open(video_path, "wb") as f:
         shutil.copyfileobj(video.file, f)
 

@@ -22,10 +22,11 @@ class JobCreate(BaseModel):
     title: str
     description: str
     required_skills: str
-    weight_score1: float = 40.0
-    weight_score2: float = 35.0
-    weight_score3: float = 25.0
-    qualifying_score: float = 60.0
+    weight_score1: float = 35.0
+    weight_score2: float = 25.0
+    weight_score3: float = 20.0
+    weight_score4: float = 20.0
+    qualifying_score: float = 50.0
 
 class JobOut(BaseModel):
     id: int
@@ -35,6 +36,7 @@ class JobOut(BaseModel):
     weight_score1: float
     weight_score2: float
     weight_score3: float
+    weight_score4: float
     qualifying_score: float
     is_active: bool
     created_at: datetime
@@ -49,6 +51,7 @@ class ApplicationOut(BaseModel):
     score1: Optional[float]
     score2: Optional[float]
     score3: Optional[float]
+    score4: Optional[float]
     final_score: Optional[float]
     is_qualified: Optional[bool]
     status: str

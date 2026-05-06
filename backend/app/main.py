@@ -8,7 +8,8 @@ from app.api.routes import router
 from app.models.database import create_tables
 
 # Ensure uploads folder exists
-os.makedirs("uploads", exist_ok=True)
+os.makedirs("uploads/resumes", exist_ok=True)
+os.makedirs("uploads/videos",  exist_ok=True)
 
 
 @asynccontextmanager
