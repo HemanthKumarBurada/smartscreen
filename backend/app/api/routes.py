@@ -14,7 +14,7 @@ from app.services.score3_frame_behavior import compute_score3
 from app.services.final_aggregator import compute_final_score
 from app.services.email_service import send_recording_link, send_result_email
 from app.config import settings
-
+from app.services.recommendation import generate_recommendations
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/hr/login")
 UPLOAD_DIR = "uploads"
@@ -35,54 +35,105 @@ def get_current_hr(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def run_video_pipeline(app_id: int, db_url: str):
-    """Background task: score video after upload."""
+def run_video_pipeline(app_id: int, video_path: str, db_url: str):
+    """Background task: score the video and notify the candidate."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    import asyncio
+ 
     engine = create_engine(db_url)
-    DBSession = sessionmaker(bind=engine)
-    db = DBSession()
+    Session = sessionmaker(bind=engine)
+    db = Session()
+ 
     try:
         app = db.query(Application).filter(Application.id == app_id).first()
-        if not app or not app.video_path:
+        if not app:
             return
+ 
         job = db.query(Job).filter(Job.id == app.job_id).first()
-
-        # Score 2
-        score2, score4, transcript = compute_score2(
-         app.video_path, app.resume_text or "", job.description or ""
-)
-        # Score 3
-        score3, frame_data = compute_score3(app.video_path, transcript)
-        # Final
+ 
+        # ── Score 2 + Score 4 (updated signature) ──────────────────────────
+        score2, score4, transcript, s2_details, s4_details = compute_score2(
+            video_path=video_path,
+            resume_text=app.resume_text or "",
+            jd_text=job.description or "",
+            required_skills=job.required_skills or ""
+        )
+ 
+        # ── Score 3 ─────────────────────────────────────────────────────────
+        from app.services.score3_frame_behavior import compute_score3
+        score3, frame_data = compute_score3(video_path, transcript)
+ 
+        # ── Score 1 details (already saved, re-parse missing skills) ────────
+        # If you stored missing_skills in the DB use app.missing_skills,
+        # otherwise pass empty lists — recommendations still work from raw text.
+        s1_missing = app.missing_skills.split(",") if app.missing_skills else []
+ 
+        # ── Final aggregated score ───────────────────────────────────────────
+        from app.services.final_aggregator import compute_final_score
         result = compute_final_score(
-    app.score1 or 0, score2, score3, score4,
-    job.weight_score1, job.weight_score2, job.weight_score3, job.weight_score4,
-    job.qualifying_score, frame_data.get("malpractice_flag", False)
-)
-
-        app.score2 = score2
-        app.score3 = score3
-        app.score4 = score4
-        app.final_score = result["final_score"]
-        app.is_qualified = result["is_qualified"]
-        app.transcript = transcript
-        app.eye_contact_pct = frame_data.get("eye_contact_pct")
+            s1=app.score1 or 0,
+            s2=score2,
+            s3=score3,
+            s4=score4,
+            w1=job.weight_score1,
+            w2=job.weight_score2,
+            w3=job.weight_score3,
+            w4=job.weight_score4,
+            qualifying_score=job.qualifying_score,
+            malpractice_flag=frame_data.get("malpractice_flag", False)
+        )
+ 
+        # ── Recommendations ─────────────────────────────────────────────────
+        recommendations = generate_recommendations(
+            score1=app.score1 or 0,
+            score2=score2,
+            score3=score3,
+            score4=score4,
+            eye_contact_pct=frame_data.get("eye_contact_pct", 0),
+            malpractice_flag=frame_data.get("malpractice_flag", False),
+            transcript=transcript,
+            resume_text=app.resume_text or "",
+            job_required_skills=job.required_skills or "",
+            job_description=job.description or "",
+            is_qualified=result["is_qualified"],
+            duration_sec=frame_data.get("duration_sec", 150.0),
+            s1_missing_skills=s1_missing,
+            s2_missing_skills=s2_details.get("missing", []),
+            s4_missing_skills=s4_details.get("missing", []),
+        )
+ 
+        # ── Persist to DB ────────────────────────────────────────────────────
+        app.score2         = score2
+        app.score3         = score3
+        app.score4         = score4
+        app.final_score    = result["final_score"]
+        app.is_qualified   = result["is_qualified"]
+        app.transcript     = transcript
+        app.eye_contact_pct = frame_data.get("eye_contact_pct", 0)
         app.malpractice_flag = frame_data.get("malpractice_flag", False)
-        app.status = "scored"
-        app.scored_at = datetime.now(timezone.utc)
+        app.status         = "scored"
+        app.scored_at      = datetime.now(timezone.utc)
         db.commit()
-
-        # Send result email (sync wrapper)
-        import asyncio
+ 
+        # ── Send result email with recommendations ────────────────────────
         asyncio.run(send_result_email(
-            app.candidate_name, app.candidate_email,
-            job.title, result["final_score"], result["is_qualified"]
+            candidate_name=app.candidate_name,
+            candidate_email=app.candidate_email,
+            job_title=job.title,
+            final_score=result["final_score"],
+            is_qualified=result["is_qualified"],
+            recommendations=recommendations
         ))
+ 
         app.status = "notified"
         db.commit()
+ 
+        print(f"[pipeline] app_id={app_id} final={result['final_score']} qualified={result['is_qualified']}")
+ 
     except Exception as e:
-        print(f"Pipeline error for app {app_id}: {e}")
+        print(f"[pipeline] ERROR app_id={app_id}: {e}")
+        import traceback; traceback.print_exc()
     finally:
         db.close()
 
@@ -168,7 +219,7 @@ async def apply(
         raise HTTPException(400, "Could not extract text from resume. Please upload a text-based PDF or DOCX.")
 
     # Score 1
-    score1 = compute_score1(resume_text, job.description, job.required_skills)
+    score1, skill_match = compute_score1(resume_text, job.description, job.required_skills)
     print(f"[apply] score1: {score1}")
 
     # Create application
@@ -180,7 +231,8 @@ async def apply(
         candidate_name=name,
         candidate_email=email,
         resume_path=resume_path,
-        resume_text=resume_text,          # ← explicitly set
+        resume_text=resume_text,  
+        missing_skills=",".join(skill_match["missing"]),# ← explicitly set
         video_token=token,
         token_expires=datetime.utcnow() + timedelta(hours=48),
         score1=score1,
@@ -250,6 +302,11 @@ async def upload_video(
     db.commit()
 
     # Run scoring pipeline in background
-    background_tasks.add_task(run_video_pipeline, app.id, settings.DATABASE_URL)
+    background_tasks.add_task(
+    run_video_pipeline,
+    app.id,
+    video_path,
+    settings.DATABASE_URL
+)
 
     return {"message": "Video received! You will get your result by email within a few minutes."}

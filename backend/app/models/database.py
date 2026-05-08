@@ -61,6 +61,7 @@ class Application(Base):
     score3 = Column(Float, nullable=True)
     score4 = Column(Float, nullable=True)
     final_score = Column(Float, nullable=True)
+    missing_skills = Column(Text, nullable=True)
     is_qualified = Column(Boolean, nullable=True)
     status = Column(String, default="resume_submitted")  # resume_submitted | video_pending | video_received | scored | notified
     transcript = Column(Text, nullable=True)
