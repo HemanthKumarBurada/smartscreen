@@ -4,6 +4,22 @@ import axios from 'axios';
 
 const MAX_SECONDS = 150; // 2 minutes 30 seconds
 
+// ─── Codec Selection ──────────────────────────────────────────────────────────
+// Explicitly request 'opus' audio codec so FFmpeg/moviepy can cleanly extract
+// audio on Windows. Without this, Chrome may pick a codec Whisper struggles with.
+function getBestMimeType() {
+  const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=opus',
+    'video/webm',
+  ];
+  for (const type of candidates) {
+    if (MediaRecorder.isTypeSupported(type)) return type;
+  }
+  return ''; // browser default fallback
+}
+
 export default function RecordPage() {
   const { token } = useParams();
   const videoRef = useRef(null);
@@ -18,7 +34,13 @@ export default function RecordPage() {
   const [error, setError] = useState('');
   const [jobInfo, setJobInfo] = useState(null);
   const [secondsLeft, setSecondsLeft] = useState(MAX_SECONDS);
-  const [rerecordUsed, setRerecordUsed] = useState(false); // only 1 re-record allowed
+  const [rerecordUsed, setRerecordUsed] = useState(false);
+  const [mimeType, setMimeType] = useState('');
+
+  useEffect(() => {
+    // Detect best codec on mount so we can show a warning early if needed
+    setMimeType(getBestMimeType());
+  }, []);
 
   useEffect(() => {
     axios.get(`/api/record/${token}`)
@@ -40,7 +62,7 @@ export default function RecordPage() {
         setSecondsLeft(prev => {
           if (prev <= 1) {
             clearInterval(timerRef.current);
-            stopRecording(); // auto-stop when time runs out
+            stopRecording();
             return 0;
           }
           return prev - 1;
@@ -62,7 +84,18 @@ export default function RecordPage() {
 
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        // ── FIX: explicit audio constraints ───────────────────────────────
+        // echoCancellation + noiseSuppression reduces background noise pickup.
+        // sampleRate 16000 matches Whisper's native training rate → better transcription.
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 16000,
+        },
+      });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -77,7 +110,13 @@ export default function RecordPage() {
 
   const startRecording = () => {
     chunksRef.current = [];
-    const mr = new MediaRecorder(streamRef.current);
+
+    // ── FIX: pass explicit mimeType with opus audio codec ─────────────────
+    // Without specifying the codec, Chrome on Windows often records audio in
+    // a format that moviepy/FFmpeg cannot cleanly decode, causing Whisper to
+    // receive garbage audio or silence.
+    const options = mimeType ? { mimeType } : {};
+    const mr = new MediaRecorder(streamRef.current, options);
     mediaRecorderRef.current = mr;
 
     mr.ondataavailable = e => {
@@ -85,7 +124,9 @@ export default function RecordPage() {
     };
 
     mr.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+      // Use the actual recorded mimeType for the Blob (may differ from requested)
+      const actualType = mr.mimeType || 'video/webm';
+      const blob = new Blob(chunksRef.current, { type: actualType });
       const url = URL.createObjectURL(blob);
       setRecordedBlob(blob);
       setPreviewUrl(url);
@@ -117,9 +158,10 @@ export default function RecordPage() {
     setStage('uploading');
     try {
       const formData = new FormData();
+      // Always send as recording.webm — backend already handles this extension
       formData.append('video', recordedBlob, 'recording.webm');
       await axios.post(`/api/record/${token}/upload`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
       setStage('done');
     } catch {
@@ -152,7 +194,6 @@ export default function RecordPage() {
           </div>
         ) : (
           <>
-            {/* Timer bar — shown only during recording */}
             {stage === 'recording' && (
               <div style={{ textAlign: 'center', marginBottom: 12 }}>
                 <div style={{
@@ -164,7 +205,6 @@ export default function RecordPage() {
                 <div style={{ fontSize: 13, color: '#888' }}>
                   {secondsLeft <= 30 ? '⚠️ Almost out of time!' : 'Time remaining'}
                 </div>
-                {/* Progress bar */}
                 <div style={{ height: 6, background: '#eee', borderRadius: 4, marginTop: 8 }}>
                   <div style={{
                     height: '100%', borderRadius: 4,

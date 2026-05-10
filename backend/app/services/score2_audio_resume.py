@@ -3,15 +3,19 @@ Score 2: Audio Transcript vs Resume  (score2)
 Score 4: Audio Transcript vs JD      (score4)
 
 Uses Whisper for transcription.
-Then applies the SAME 3-layer matching strategy as Score 1:
+Then applies the SAME direct full-text matching strategy as the updated Score 1:
   - 70% semantic document-level cosine similarity
-  - 30% skill overlap via exact + fuzzy + semantic matching
+  - 30% skill overlap via direct substring + fuzzy + semantic matching
 
-This ensures consistency across all scores and eliminates the raw-cosine-only weakness.
+FIX: Skills are now matched directly against the full transcript text instead of
+extracting skill tokens from the transcript first. The old approach split on
+delimiters and filtered long sentences, so skills only mentioned in natural
+speech ("I have worked with Redis for job queuing") were silently dropped.
 """
 
 import whisper
 import os
+import re
 from sentence_transformers import SentenceTransformer, util
 from rapidfuzz import fuzz
 from app.config import settings
@@ -62,120 +66,110 @@ def extract_audio_and_transcribe(video_path: str) -> dict:
     }
 
 
-# ─── Skill Extraction from Text ───────────────────────────────────────────────
+# ─── Transcript Line Splitter ─────────────────────────────────────────────────
 
-def extract_skills_from_text(text: str) -> list[str]:
+def get_transcript_lines(transcript: str) -> list[str]:
     """
-    Extract skill-like tokens from free text (resume or transcript).
-    No hardcoded list — works for any domain.
-    Mirrors the same function in score1_resume_jd.py.
+    Split transcript into sentence-level chunks for fuzzy and semantic matching.
+    Whisper transcripts are mostly punctuation-separated sentences.
     """
-    import re
-
-    text = text.lower().strip()
-
-    stop_words = {
-        "experience", "knowledge", "understanding", "proficiency",
-        "ability", "skills", "years", "strong", "good", "excellent",
-        "familiar", "working", "hands-on", "using", "with", "and", "or",
-        "the", "a", "an", "in", "of", "for", "to", "is", "was", "my",
-        "i", "we", "have", "had", "been", "am", "are", "also", "as"
-    }
-
-    # Split on delimiters common in resumes and job descriptions
-    raw_tokens = re.split(r'[,\n\r•\-\|/]', text)
-
-    skills = []
-    for token in raw_tokens:
-        token = re.sub(r'^[\s\-•*]+|[\s\-•*]+$', '', token.strip())
-        if len(token) < 2 or len(token) > 40:
-            continue
-        if token in stop_words:
-            continue
-        if len(token.split()) > 5:
-            continue
-        if token:
-            skills.append(token)
-
-    return list(set(skills))
+    lines = re.split(r'[.\n\r,]', transcript.lower())
+    return [l.strip() for l in lines if len(l.strip()) > 3]
 
 
-# ─── Skill Matching (exact + fuzzy + semantic) ────────────────────────────────
+# ─── Skill Matching Against Full Transcript ───────────────────────────────────
 
 def match_skills_in_transcript(
-    spoken_skills: list[str],
     target_skills: list[str],
-    fuzzy_threshold: int = 78,
-    semantic_threshold: float = 0.72
+    transcript: str,
+    fuzzy_threshold: int = 85,
+    semantic_threshold: float = 0.72,
 ) -> dict:
     """
-    Match skills spoken in transcript against target skills (resume or JD).
-    3-layer matching — same approach as Score 1.
+    For each target skill (from JD required skills), check whether the candidate
+    mentioned it anywhere in their spoken transcript using 3 strategies.
 
-    spoken_skills  : skills extracted from Whisper transcript
-    target_skills  : skills from resume or JD to match against
+    Strategy 1 — Direct substring:
+        "redis" found in "i have worked with redis for job queuing"
+        Handles skills mentioned naturally in speech.
+
+    Strategy 2 — Fuzzy line match:
+        partial_ratio("react.js", "i built the frontend in react js") >= 85
+        Handles spoken pronunciation variants and minor transcription errors.
+
+    Strategy 3 — Semantic sentence match:
+        Encodes transcript sentences and compares cosine similarity.
+        Catches abbreviations: "ml" vs "machine learning", "nlp" vs "natural language processing".
     """
     if not target_skills:
         return {"matched": [], "missing": [], "score": 0.0}
 
     model = get_st_model()
+    transcript_lower = transcript.lower()
+    transcript_lines = get_transcript_lines(transcript)
+
+    # Pre-encode transcript lines once — reused for every skill in strategy 3
+    line_embeddings = model.encode(transcript_lines, convert_to_tensor=True) \
+        if transcript_lines else None
+
     matched = []
     missing = []
 
-    spoken_embeddings = model.encode(spoken_skills, convert_to_tensor=True) \
-        if spoken_skills else None
-
-    for target_skill in target_skills:
-        ts = target_skill.lower().strip()
+    for skill in target_skills:
+        skill_clean = skill.lower().strip()
         is_matched = False
+        match_method = None
 
-        for spoken in spoken_skills:
-            sp = spoken.lower().strip()
+        # ── Strategy 1: Direct substring in full transcript ───────────────
+        # Catches skills spoken naturally anywhere in the transcript.
+        if skill_clean in transcript_lower:
+            is_matched = True
+            match_method = "substring"
 
-            # Layer 1: exact match
-            if ts == sp:
+        # ── Strategy 2: Fuzzy match against transcript sentences ──────────
+        # Handles transcription errors: "nest js" vs "nestjs", "type script" vs "typescript"
+        if not is_matched:
+            for line in transcript_lines:
+                if fuzz.partial_ratio(skill_clean, line) >= fuzzy_threshold:
+                    is_matched = True
+                    match_method = "fuzzy"
+                    break
+
+        # ── Strategy 3: Semantic match against transcript sentences ───────
+        # Catches conceptual equivalents spoken differently:
+        # "rest apis" vs "restful", "postgres" vs "postgresql"
+        if not is_matched and line_embeddings is not None:
+            skill_emb = model.encode(skill_clean, convert_to_tensor=True)
+            sims = util.cos_sim(skill_emb, line_embeddings)[0]
+            max_sim = float(sims.max())
+            if max_sim >= semantic_threshold:
                 is_matched = True
-                break
-
-            # Layer 2: substring (java developer contains java)
-            if ts in sp or sp in ts:
-                is_matched = True
-                break
-
-            # Layer 3: fuzzy (react.js ↔ react, scikit-learn ↔ scikit learn)
-            if fuzz.ratio(ts, sp) >= fuzzy_threshold:
-                is_matched = True
-                break
-
-        # Layer 4: semantic (ml ↔ machine learning, k8s ↔ kubernetes)
-        if not is_matched and spoken_embeddings is not None and len(spoken_skills) > 0:
-            target_emb = model.encode(ts, convert_to_tensor=True)
-            sims = util.cos_sim(target_emb, spoken_embeddings)[0]
-            if float(sims.max()) >= semantic_threshold:
-                is_matched = True
+                match_method = "semantic"
 
         if is_matched:
-            matched.append(target_skill)
+            matched.append(skill)
+            print(f"[skill_match] MATCHED '{skill}' via {match_method}")
         else:
-            missing.append(target_skill)
+            missing.append(skill)
+            print(f"[skill_match] MISSING '{skill}'")
 
     score = len(matched) / len(target_skills) if target_skills else 0.0
-    return {"matched": matched, "missing": missing, "score": score}
+    return {"matched": matched, "missing": missing, "score": round(score, 3)}
 
 
-# ─── Score Computation ────────────────────────────────────────────────────────
+# ─── Single Score Computation ─────────────────────────────────────────────────
 
 def _compute_single_score(
     transcript: str,
     target_text: str,
     target_skills: list[str],
-    label: str = "score"
+    label: str = "score",
 ) -> tuple[float, dict]:
     """
-    Compute a single score (transcript vs target).
+    Compute a single score (transcript vs target text).
 
-    70% document-level semantic similarity
-    30% skill overlap (exact + fuzzy + semantic)
+    70% — document-level cosine similarity (how related the speech is to the target)
+    30% — skill overlap (how many required skills were actually mentioned)
 
     Returns (score_0_to_100, details_dict)
     """
@@ -187,39 +181,39 @@ def _compute_single_score(
     semantic_sim   = float(util.cos_sim(emb_transcript, emb_target)[0][0])
     semantic_sim   = max(0.0, min(1.0, semantic_sim))
 
-    # 30% — skill-level match
-    spoken_skills = extract_skills_from_text(transcript)
-    skill_result  = match_skills_in_transcript(spoken_skills, target_skills)
+    # 30% — match required skills directly against full transcript text
+    skill_result = match_skills_in_transcript(target_skills, transcript)
 
     final = (0.70 * semantic_sim + 0.30 * skill_result["score"]) * 100
 
     print(f"[{label}] semantic={semantic_sim:.2f}  skill_overlap={skill_result['score']:.2f}")
-    print(f"[{label}] spoken skills: {spoken_skills[:8]}")
     print(f"[{label}] matched: {skill_result['matched']}")
     print(f"[{label}] missing: {skill_result['missing']}")
 
     return round(min(final, 100.0), 2), skill_result
 
 
+# ─── Main Entry Point ─────────────────────────────────────────────────────────
+
 def compute_score2(
     video_path: str,
     resume_text: str,
     jd_text: str = "",
-    required_skills: str = ""
+    required_skills: str = "",
 ) -> tuple[float, float, str, dict, dict]:
     """
     Main entry point.
 
     Returns:
-        score2          : transcript vs resume  (0–100)
-        score4          : transcript vs JD      (0–100)
-        transcript      : full Whisper transcript text
-        s2_details      : matched/missing skills for score2
-        s4_details      : matched/missing skills for score4
+        score2     : transcript vs resume  (0–100)
+        score4     : transcript vs JD      (0–100)
+        transcript : full Whisper transcript text
+        s2_details : matched/missing skills for score2
+        s4_details : matched/missing skills for score4
     """
     try:
-        result      = extract_audio_and_transcribe(video_path)
-        transcript  = result["text"].strip()
+        result     = extract_audio_and_transcribe(video_path)
+        transcript = result["text"].strip()
 
         print(f"[score2] transcript length: {len(transcript)} chars")
         print(f"[score2] transcript preview: {transcript[:120]!r}")
@@ -228,22 +222,22 @@ def compute_score2(
             empty = {"matched": [], "missing": [], "score": 0.0}
             return 0.0, 0.0, "", empty, empty
 
-        # ── Score 2: transcript vs resume ────────────────────────────────
-        # Use JD required_skills as the skill set to check coverage in spoken content
-        # (candidate should verbally confirm skills on their resume that the JD cares about)
-        resume_skills = [s.strip().lower() for s in required_skills.split(",") if s.strip()] \
-                        if required_skills else extract_skills_from_text(resume_text)
+        # Parse required skills once — used for both score2 and score4
+        jd_skills = [s.strip().lower() for s in required_skills.split(",") if s.strip()]
 
+        # ── Score 2: transcript vs resume ─────────────────────────────────
+        # Checks whether what the candidate *said* aligns with their resume
+        # and covers the skills the JD requires.
         score2, s2_details = _compute_single_score(
-            transcript, resume_text, resume_skills, label="score2"
+            transcript, resume_text, jd_skills, label="score2"
         )
 
-        # ── Score 4: transcript vs JD ─────────────────────────────────────
+        # ── Score 4: transcript vs JD ──────────────────────────────────────
+        # Checks whether the candidate's speech is relevant to the job description.
         score4     = 0.0
         s4_details = {"matched": [], "missing": [], "score": 0.0}
 
         if jd_text:
-            jd_skills = [s.strip().lower() for s in required_skills.split(",") if s.strip()]
             score4, s4_details = _compute_single_score(
                 transcript, jd_text, jd_skills, label="score4"
             )

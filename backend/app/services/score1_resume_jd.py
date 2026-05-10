@@ -1,15 +1,17 @@
 """
 Score 1: Semantic similarity between resume and job description.
 70% document-level cosine similarity
-30% skill overlap using fuzzy + semantic matching
+30% skill overlap using direct full-text matching
 
-Handles real-world variations:
-- java developer  vs  java
-- react.js        vs  react
-- scikit learn    vs  scikit-learn
-- ml              vs  machine learning
-- k8s             vs  kubernetes
-- aws s3, ec2     vs  aws
+FIX: Skills are now matched directly against the full resume text instead of
+extracting skills from the resume first. The old approach split on delimiters
+and filtered long sentences, causing skills that only appeared in experience
+bullet points (e.g. "scheduling with Redis and Bull") to be silently dropped.
+
+Matching strategies (in order):
+1. Direct substring   — "redis" in full resume text
+2. Fuzzy line match   — partial_ratio >= 85 on each resume line
+3. Semantic embedding — cosine similarity >= 0.72 against resume sentences
 """
 
 from sentence_transformers import SentenceTransformer, util
@@ -26,109 +28,78 @@ def get_model():
     return _model
 
 
-def extract_skills_from_text(text: str) -> list[str]:
+def get_resume_lines(resume_text: str) -> list[str]:
     """
-    Extract skill-like tokens from any free-form text.
-    No hardcoded keyword list — works on any domain.
+    Split resume into meaningful lines/chunks for fuzzy and semantic matching.
+    Filters out blank lines and very short fragments.
     """
-    text = text.lower().strip()
-
-    stop_words = {
-        "experience", "knowledge", "understanding", "proficiency",
-        "ability", "skills", "years", "strong", "good", "excellent",
-        "familiar", "working", "hands-on", "using", "with", "and",
-        "or", "the", "a", "an", "of", "in", "to", "for", "on", "at",
-        "is", "are", "was", "were", "be", "been", "have", "has", "had"
-    }
-
-    # Split on common delimiters used in skill lists and resumes
-    raw_tokens = re.split(r'[,\n\r•\-\|/\(\)]', text)
-
-    skills = []
-    for token in raw_tokens:
-        token = token.strip()
-        # Remove leading/trailing punctuation and whitespace
-        token = re.sub(r'^[\s\-•*·]+|[\s\-•*·]+$', '', token)
-
-        # Skip if too short or too long
-        if len(token) < 2 or len(token) > 40:
-            continue
-
-        # Skip pure stop words
-        if token in stop_words:
-            continue
-
-        # Skip lines that look like full sentences (too many words = not a skill)
-        if len(token.split()) > 5:
-            continue
-
-        # Skip lines that are mostly numbers
-        if re.match(r'^\d+[\s\%\+]*$', token):
-            continue
-
-        if token:
-            skills.append(token)
-
-    return list(set(skills))
+    lines = re.split(r'[\n\r•]', resume_text.lower())
+    return [l.strip() for l in lines if len(l.strip()) > 3]
 
 
-def match_skills_semantic(
-    resume_skills: list[str],
+def match_skills_against_resume(
     jd_skills: list[str],
-    fuzzy_threshold: int = 80,
-    semantic_threshold: float = 0.72
+    resume_text: str,
+    fuzzy_threshold: int = 85,
+    semantic_threshold: float = 0.72,
 ) -> dict:
     """
-    Match resume skills against JD required skills using 4 strategies:
+    For each JD required skill, check whether it appears anywhere in the
+    full resume text using 3 strategies.
 
-    1. Exact match           — "python" == "python"
-    2. Substring match       — "java developer" contains "java"
-    3. Fuzzy string match    — "react.js" ~= "react" (ratio >= 80)
-    4. Semantic embedding    — "ml" ~= "machine learning" (cosine >= 0.72)
+    Strategy 1 — Direct substring:
+        "redis" found in "scheduling with Redis and Bull for automated posting"
+        Fast, zero false-positives for exact technology names.
+
+    Strategy 2 — Fuzzy line match:
+        partial_ratio("react.js", "built frontend using react js and typescript") >= 85
+        Handles punctuation variants and minor typos.
+
+    Strategy 3 — Semantic sentence match:
+        Encodes each resume line and compares cosine similarity.
+        Catches abbreviations: "ml" vs "machine learning", "k8s" vs "kubernetes".
     """
     if not jd_skills:
         return {"matched": [], "missing": [], "score": 0.0}
 
-    if not resume_skills:
-        return {"matched": [], "missing": jd_skills, "score": 0.0}
-
     model = get_model()
+    resume_lower = resume_text.lower()
+    resume_lines = get_resume_lines(resume_text)
+
+    # Pre-encode resume lines once — reused for every JD skill in strategy 3
+    line_embeddings = model.encode(resume_lines, convert_to_tensor=True) \
+        if resume_lines else None
+
     matched = []
     missing = []
-
-    # Pre-encode all resume skills once for efficiency
-    resume_embeddings = model.encode(resume_skills, convert_to_tensor=True)
 
     for jd_skill in jd_skills:
         jd_clean = jd_skill.lower().strip()
         is_matched = False
         match_method = None
 
-        for r_skill in resume_skills:
-            r_clean = r_skill.lower().strip()
+        # ── Strategy 1: Direct substring in full resume text ─────────────
+        # Catches skills mentioned anywhere: skill sections, bullet points,
+        # project descriptions, anywhere in the document.
+        if jd_clean in resume_lower:
+            is_matched = True
+            match_method = "substring"
 
-            # Strategy 1: Exact match
-            if jd_clean == r_clean:
-                is_matched = True
-                match_method = "exact"
-                break
-
-            # Strategy 2: Substring match (java dev contains java, aws s3 contains aws)
-            if jd_clean in r_clean or r_clean in jd_clean:
-                is_matched = True
-                match_method = "substring"
-                break
-
-            # Strategy 3: Fuzzy match (react.js vs react, scikit-learn vs scikit learn)
-            if fuzz.ratio(jd_clean, r_clean) >= fuzzy_threshold:
-                is_matched = True
-                match_method = "fuzzy"
-                break
-
-        # Strategy 4: Semantic match (ml vs machine learning, k8s vs kubernetes)
+        # ── Strategy 2: Fuzzy match against each resume line ─────────────
+        # Handles "react.js" vs "react js", "node.js" vs "nodejs", etc.
         if not is_matched:
+            for line in resume_lines:
+                if fuzz.partial_ratio(jd_clean, line) >= fuzzy_threshold:
+                    is_matched = True
+                    match_method = "fuzzy"
+                    break
+
+        # ── Strategy 3: Semantic match against resume lines ───────────────
+        # Catches conceptual equivalents: "ml" vs "machine learning",
+        # "k8s" vs "kubernetes", "rest" vs "restful apis".
+        if not is_matched and line_embeddings is not None:
             jd_emb = model.encode(jd_clean, convert_to_tensor=True)
-            sims = util.cos_sim(jd_emb, resume_embeddings)[0]
+            sims = util.cos_sim(jd_emb, line_embeddings)[0]
             max_sim = float(sims.max())
             if max_sim >= semantic_threshold:
                 is_matched = True
@@ -145,40 +116,38 @@ def match_skills_semantic(
     return {
         "matched": matched,
         "missing": missing,
-        "score": round(score, 3)
+        "score": round(score, 3),
     }
 
 
 def compute_score1(
     resume_text: str,
     jd_text: str,
-    required_skills: str
+    required_skills: str,
 ) -> tuple[float, dict]:
     """
     Returns (score_out_of_100, skill_match_details)
 
     skill_match_details = {
-        "matched": [...],   # skills found in resume
-        "missing": [...],   # skills not found in resume
+        "matched": [...],   # JD skills found in resume
+        "missing": [...],   # JD skills not found in resume
         "score":   0.0-1.0  # skill overlap ratio
     }
     """
     model = get_model()
 
-    # ── 70%: Document-level semantic similarity ──────────────────────────
+    # ── 70%: Document-level semantic similarity ───────────────────────────
     emb_resume = model.encode(resume_text[:2000], convert_to_tensor=True)
     emb_jd     = model.encode(jd_text[:2000],     convert_to_tensor=True)
-    semantic_sim = float(util.cos_sim(emb_resume, emb_jd)[0][0])
+    semantic_sim   = float(util.cos_sim(emb_resume, emb_jd)[0][0])
     semantic_score = max(0.0, min(1.0, semantic_sim))
 
     # ── 30%: Skill-level matching ─────────────────────────────────────────
-    # Extract skills from resume using NLP heuristics
-    resume_skills = extract_skills_from_text(resume_text)
-
-    # JD required skills come from the HR-entered comma-separated field
+    # Parse HR-entered comma-separated required skills
     jd_skills = [s.strip().lower() for s in required_skills.split(",") if s.strip()]
 
-    skill_match = match_skills_semantic(resume_skills, jd_skills)
+    # Match each JD skill directly against full resume text (not extracted tokens)
+    skill_match = match_skills_against_resume(jd_skills, resume_text)
     skill_score = skill_match["score"]
 
     # ── Final score ───────────────────────────────────────────────────────
