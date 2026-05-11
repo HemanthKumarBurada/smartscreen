@@ -60,5 +60,6 @@ class ApplicationOut(BaseModel):
     transcript: Optional[str]
     created_at: datetime
     scored_at: Optional[datetime]
+    missing_skills: Optional[str] = None
     class Config:
         from_attributes = True

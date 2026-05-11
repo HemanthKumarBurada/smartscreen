@@ -10,11 +10,13 @@ Every recommendation is specific:
   - Quotes real WPM from the transcript
   - Identifies which resume skills were never mentioned verbally
   - Detects filler-heavy speech patterns
+
+FIX: final_score parameter added so the qualified message shows the real
+weighted final score instead of a wrong simple average of 4 scores.
 """
 
 import re
 from typing import Optional
-
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -25,17 +27,14 @@ FILLER_PATTERNS = [
     r'\blike\b',  r'\bum+\b', r'\buh+\b', r'\bhmm+\b',
 ]
 
-
 def _count_fillers(transcript: str) -> int:
     t = transcript.lower()
     return sum(len(re.findall(p, t)) for p in FILLER_PATTERNS)
-
 
 def _wpm(transcript: str, duration_sec: float) -> float:
     if not transcript or duration_sec <= 0:
         return 0.0
     return len(transcript.split()) / duration_sec * 60
-
 
 def _word_count(transcript: str) -> int:
     return len(transcript.split()) if transcript else 0
@@ -55,12 +54,14 @@ def generate_recommendations(
     job_required_skills: str,
     job_description: str,
     is_qualified: bool,
+    # FIX: accept the real weighted final_score from the pipeline
+    # instead of computing a wrong simple average inside this function
+    final_score: float = 0.0,
     duration_sec: float = 150.0,
-    # Skill details from scoring pipeline (passed in from score1 + score2 results)
     s1_missing_skills: Optional[list] = None,
     s1_matched_skills: Optional[list] = None,
-    s2_missing_skills: Optional[list] = None,   # skills on JD not spoken
-    s4_missing_skills: Optional[list] = None,   # JD skills not addressed verbally
+    s2_missing_skills: Optional[list] = None,
+    s4_missing_skills: Optional[list] = None,
 ) -> list[str]:
     """
     Returns a list of specific, actionable recommendation strings.
@@ -84,7 +85,6 @@ def generate_recommendations(
                 f"Add these explicitly if you have experience with them."
             )
         elif jd_skills:
-            # Fallback: compute manually
             missing = [s for s in jd_skills if s not in resume_lower]
             matched = [s for s in jd_skills if s in resume_lower]
             if missing:
@@ -102,7 +102,6 @@ def generate_recommendations(
 
     # ── SCORE 2: Transcript vs Resume ─────────────────────────────────────────
     if score2 < 70 and transcript:
-        # Find JD-required skills that appear in resume but were NOT spoken
         in_resume_not_spoken = []
         for skill in jd_skills:
             if skill in resume_lower and skill not in transcript_lower:
@@ -147,14 +146,11 @@ def generate_recommendations(
 
     # ── SCORE 3: Behavioral ───────────────────────────────────────────────────
 
-    # Malpractice (highest priority)
     if malpractice_flag:
         recs.append(
             "🚨 Malpractice Detected: Multiple faces were visible during your recording. "
             "Record alone in a private room. Presence of others automatically lowers your score."
         )
-
-    # Eye contact with real percentage
     elif eye_contact_pct < 40:
         recs.append(
             f"👁️ Eye Contact ({eye_contact_pct:.0f}% — aim for 70%+): "
@@ -169,7 +165,7 @@ def generate_recommendations(
             f"can help you focus on the lens."
         )
 
-    # ── Speaking Pace (actual WPM) ────────────────────────────────────────────
+    # ── Speaking Pace ─────────────────────────────────────────────────────────
     if transcript:
         actual_wpm = _wpm(transcript, duration_sec)
         wc = _word_count(transcript)
@@ -188,7 +184,6 @@ def generate_recommendations(
                     f"breathe, and let each idea land before moving to the next."
                 )
 
-        # Response length
         if wc < 100:
             recs.append(
                 f"⏱️ Too Short ({wc} words): A strong introduction covers your background, "
@@ -200,7 +195,6 @@ def generate_recommendations(
                 f"Focus on 2–3 key projects and your strongest qualifications."
             )
 
-        # Filler / shallow speech detection
         filler_count = _count_fillers(transcript)
         filler_ratio = filler_count / max(wc / 20, 1)
 
@@ -212,7 +206,7 @@ def generate_recommendations(
                 f"'I built a REST API with FastAPI that processed 10k requests/day.'"
             )
 
-    # ── Positive note or summary ───────────────────────────────────────────────
+    # ── Summary header ────────────────────────────────────────────────────────
     if not recs:
         recs.append(
             "✅ Excellent performance across all dimensions. "
@@ -220,9 +214,11 @@ def generate_recommendations(
             "Keep the same clarity and preparation in your next interview."
         )
     elif is_qualified:
+        # FIX: use the real weighted final_score passed from the pipeline,
+        # not a simple average of 4 scores which ignores HR-configured weights.
         recs.insert(
             0,
-            f"✅ You Qualified (score: {(score1+score2+score3+score4)/4:.0f}% avg)! "
+            f"✅ You Qualified (final score: {final_score:.1f}%)! "
             f"Here are targeted areas to sharpen further:"
         )
     else:

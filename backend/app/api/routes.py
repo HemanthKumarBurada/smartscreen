@@ -86,22 +86,23 @@ def run_video_pipeline(app_id: int, video_path: str, db_url: str):
  
         # ── Recommendations ─────────────────────────────────────────────────
         recommendations = generate_recommendations(
-            score1=app.score1 or 0,
-            score2=score2,
-            score3=score3,
-            score4=score4,
-            eye_contact_pct=frame_data.get("eye_contact_pct", 0),
-            malpractice_flag=frame_data.get("malpractice_flag", False),
-            transcript=transcript,
-            resume_text=app.resume_text or "",
-            job_required_skills=job.required_skills or "",
-            job_description=job.description or "",
-            is_qualified=result["is_qualified"],
-            duration_sec=frame_data.get("duration_sec", 150.0),
-            s1_missing_skills=s1_missing,
-            s2_missing_skills=s2_details.get("missing", []),
-            s4_missing_skills=s4_details.get("missing", []),
-        )
+    score1=app.score1 or 0,
+    score2=score2,
+    score3=score3,
+    score4=score4,
+    eye_contact_pct=frame_data.get("eye_contact_pct", 0),
+    malpractice_flag=frame_data.get("malpractice_flag", False),
+    transcript=transcript,
+    resume_text=app.resume_text or "",
+    job_required_skills=job.required_skills or "",
+    job_description=job.description or "",
+    is_qualified=result["is_qualified"],
+    final_score=result["final_score"],   # ← ADD THIS LINE
+    duration_sec=frame_data.get("duration_sec", 150.0),
+    s1_missing_skills=s1_missing,
+    s2_missing_skills=s2_details.get("missing", []),
+    s4_missing_skills=s4_details.get("missing", []),
+)
  
         # ── Persist to DB ────────────────────────────────────────────────────
         app.score2         = score2
@@ -264,7 +265,7 @@ def get_record_info(token: str, db: Session = Depends(get_db)):
     app = db.query(Application).filter(Application.video_token == token).first()
     if not app:
         raise HTTPException(404, "Invalid recording link")
-    if app.token_expires and datetime.utcnow() > app.token_expires:
+    if app.token_expires and datetime.utcnow() > app.token_expires.replace(tzinfo=None):
         raise HTTPException(410, "Recording link has expired")
     if app.video_path:
         raise HTTPException(409, "Video already submitted")
@@ -285,7 +286,7 @@ async def upload_video(
     app = db.query(Application).filter(Application.video_token == token).first()
     if not app:
         raise HTTPException(404, "Invalid token")
-    if app.token_expires and datetime.utcnow() > app.token_expires:
+    if app.token_expires and datetime.utcnow() > app.token_expires.replace(tzinfo=None):
         raise HTTPException(410, "Link expired")
     if app.video_path:
         raise HTTPException(409, "Video already submitted")

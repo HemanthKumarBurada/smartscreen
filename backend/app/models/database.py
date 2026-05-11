@@ -35,11 +35,11 @@ class Job(Base):
     title = Column(String)
     description = Column(Text)
     required_skills = Column(Text)  # comma-separated
-    weight_score1 = Column(Float, default=40.0)   # resume vs JD
-    weight_score2 = Column(Float, default=35.0)   # audio vs resume
-    weight_score3 = Column(Float, default=25.0)   # frame behavior
+    weight_score1 = Column(Float, default=35.0)   # resume vs JD
+    weight_score2 = Column(Float, default=25.0)   # audio vs resume
+    weight_score3 = Column(Float, default=20.0)   # frame behavior
     weight_score4 = Column(Float, default=20.0)   # add 4th weight
-    qualifying_score = Column(Float, default=60.0)
+    qualifying_score = Column(Float, default=50.0)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     hr = relationship("HRUser", back_populates="jobs")
